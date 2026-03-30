@@ -1,0 +1,54 @@
+# System & OS files
+.DS_Store
+Thumbs.db
+
+# Logs & temp files
+*.log
+*.tmp
+*.out
+
+# Build / output directories
+out/
+build/
+dist/
+
+# Assets (if generated or not needed in repo)
+assets/
+*.jpg
+*.jpeg
+*.tiff
+*.png
+*.gif
+
+# Data files
+*.xlsx
+
+# Scripts / executables
+*.bat
+
+# Design files
+*.ai
+*.pptx
+
+
+# Fonts
+*.ttf
+*.otf
+
+# Config / dependencies
+requirements.txt
+
+# YAML files
+*.yaml
+*.yml
+
+# Custom folders
+Cities/
+
+# Default system layout files (adjust if needed)
+default_system_layout_files/
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
