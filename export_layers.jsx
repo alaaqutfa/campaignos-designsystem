@@ -1,4 +1,5 @@
 // ExtendScript – Export ALL visible unlocked items (per-layer reversed index)
+// Outputs CSV file with suffix "_need_check" for review before YAML conversion.
 // #target illustrator
 
 // CONFIGURATION
@@ -11,13 +12,6 @@ function log(msg) {
     logFile.writeln(msg);
 }
 
-// Helper: pad number with leading zeros
-function zeroPad(num, len) {
-    var s = String(num);
-    while (s.length < len) s = "0" + s;
-    return s;
-}
-
 // Helper: safe get property
 function safeGet(obj, prop) {
     try {
@@ -27,35 +21,111 @@ function safeGet(obj, prop) {
     }
 }
 
-// Helper: escape CSV field
-function escapeCSVField(field) {
-    if (typeof field === "string" && (field.indexOf(",") > -1 || field.indexOf('"') > -1)) {
-        return '"' + field.replace(/"/g, '""') + '"';
+// ================== Get effective bounds for groups ==================
+function getItemEffectiveBounds(item) {
+    try {
+        // If item is a group, try to find a suitable child
+        if (item.typename === "GroupItem") {
+            var candidates = [];
+            // Safely collect children
+            try {
+                if (item.placedItems && item.placedItems.length) {
+                    candidates = candidates.concat(item.placedItems);
+                }
+                if (item.rasterItems && item.rasterItems.length) {
+                    candidates = candidates.concat(item.rasterItems);
+                }
+                if (item.pathItems && item.pathItems.length) {
+                    candidates = candidates.concat(item.pathItems);
+                }
+                if (item.compoundPathItems && item.compoundPathItems.length) {
+                    candidates = candidates.concat(item.compoundPathItems);
+                }
+                if (item.pageItems && item.pageItems.length) {
+                    for (var i = 0; i < item.pageItems.length; i++) {
+                        var child = item.pageItems[i];
+                        if (child.typename !== "GroupItem") {
+                            candidates.push(child);
+                        }
+                    }
+                }
+            } catch (e) {
+                log("  Error collecting children: " + e.message);
+            }
+
+            // Remove duplicates
+            var unique = [];
+            var seen = {};
+            for (var i = 0; i < candidates.length; i++) {
+                var key = candidates[i].name + "_" + candidates[i].typename;
+                if (!seen[key]) {
+                    seen[key] = true;
+                    unique.push(candidates[i]);
+                }
+            }
+
+            // Prefer placed/raster items
+            var best = null;
+            for (var i = 0; i < unique.length; i++) {
+                var child = unique[i];
+                if (child.typename === "PlacedItem" || child.typename === "RasterItem") {
+                    best = child;
+                    break;
+                }
+            }
+            if (!best && unique.length > 0) {
+                best = unique[0];
+            }
+
+            if (best) {
+                var bounds;
+                try {
+                    if (useGeometricBounds) {
+                        bounds = safeGet(best, "geometricBounds");
+                    } else {
+                        bounds = safeGet(best, "visibleBounds");
+                    }
+                    if (bounds && bounds.length === 4) {
+                        log("  Using bounds from child: " + best.typename + " " + best.name);
+                        return bounds;
+                    }
+                } catch (e) {
+                    log("  Error getting bounds from child: " + e.message);
+                }
+            }
+        }
+        // Fallback: use item's own bounds
+        if (useGeometricBounds) {
+            return safeGet(item, "geometricBounds");
+        } else {
+            return safeGet(item, "visibleBounds");
+        }
+    } catch (e) {
+        log("  getItemEffectiveBounds failed: " + e.message);
+        return null;
     }
-    return field;
 }
 
 // ================== Name parsing ==================
-var KNOWN_TYPES = ["banner", "bannerLogo", "bannerShopName"];
-
-function parseItemName(name) {
+function parseItemName(name, artboardName) {
     if (!name || name.indexOf(pattern) !== 0) {
-        return { imageName: name || "", type: "image" };
+        log(name);
+        return { imageName: name || "empty", type: "image" };
     }
     var rest = name.substring(pattern.length); // after "img_"
-    var parts = rest.split("_");
-    if (parts.length === 0) {
-        return { imageName: rest, type: "image" };
+    var imageName = rest;
+    var type = "image";
+    if (rest.indexOf("banner") !== -1) {
+        type = "banner";
     }
-    var lastPart = parts[parts.length - 1];
-    // Check if last part is a known type
-    if (KNOWN_TYPES && typeof KNOWN_TYPES.indexOf === "function" && KNOWN_TYPES.indexOf(lastPart) !== -1) {
-        var type = lastPart;
-        var imageName = parts.slice(0, -1).join("_");
-        return { imageName: imageName, type: type };
-    } else {
-        return { imageName: rest, type: "image" };
+    if (rest.indexOf("bannerLogo") !== -1) {
+        type = "banner_logo";
     }
+    if (rest.indexOf("bannerShopName") !== -1) {
+        type = "banner_shop_name";
+    }
+    imageName = imageName+"_"+artboardName+".png";
+    return { imageName: imageName, type: type };
 }
 
 // ================== Color helpers ==================
@@ -80,18 +150,15 @@ function colorToString(color) {
 function getItemFillColor(item) {
     if (!item) return "";
     try {
-        // Direct fillColor
         if (item.fillColor) {
             return colorToString(item.fillColor);
         }
-        // If it's a group, look into its children
         if (item.typename === "GroupItem" && item.pageItems && item.pageItems.length > 0) {
             for (var i = 0; i < item.pageItems.length; i++) {
                 var col = getItemFillColor(item.pageItems[i]);
                 if (col) return col;
             }
         }
-        // If it's a compound path, it may have fillColor at path level
         if (item.typename === "CompoundPathItem" && item.pathItems && item.pathItems.length > 0) {
             for (var i = 0; i < item.pathItems.length; i++) {
                 var col = getItemFillColor(item.pathItems[i]);
@@ -144,7 +211,6 @@ function collectItems() {
 function collectItemsRecursive(parent, itemsArray, layerName) {
     if (!parent || parent.hidden || parent.locked) return;
 
-    // GroupItem: add if name matches, but do not descend
     if (parent.typename === "GroupItem") {
         if (parent.name && parent.name.indexOf(pattern) !== -1) {
             itemsArray.push({ item: parent, layerName: layerName });
@@ -152,15 +218,15 @@ function collectItemsRecursive(parent, itemsArray, layerName) {
         return;
     }
 
-    // Layer: iterate its children
     if (parent.typename === "Layer") {
-        for (var i = 0; i < parent.pageItems.length; i++) {
-            collectItemsRecursive(parent.pageItems[i], itemsArray, parent.name);
+        if (parent.pageItems) {
+            for (var i = 0; i < parent.pageItems.length; i++) {
+                collectItemsRecursive(parent.pageItems[i], itemsArray, parent.name);
+            }
         }
         return;
     }
 
-    // All other items: add if name matches
     if (parent.name && parent.name.indexOf(pattern) !== -1) {
         itemsArray.push({ item: parent, layerName: layerName });
     }
@@ -194,10 +260,12 @@ function main() {
 
     // CSV headers
     var headers = [
-        "layout", "layout_type", "element_type", "color",
-        "image", "index", "anchor", "ArtBoard_Width", "ArtBoard_Height",
-        "Img_Width", "Img_Height", "Img_X", "Img_y", "ratio", "width_pct",
-        "height_pct", "x_offset_pct", "y_offset_pct", "font_size_pct"
+        "layout", "layout_type", "element_type", "bg_type",
+        "background_color", "image", "index", "anchor",
+        "ArtBoard_Width", "ArtBoard_Height",
+        "Img_Width", "Img_Height", "Img_X", "Img_y",
+        "ratio", "width_pct", "height_pct",
+        "x_offset_pct", "y_offset_pct", "font_size_pct"
     ];
     var csvRows = [headers.join(",")];
 
@@ -207,28 +275,20 @@ function main() {
     for (var l = 0; l < layerOrder.length; l++) {
         var layerName = layerOrder[l];
         var items = layerItems[layerName];
-        // Reverse order: last item becomes index 1
         for (var idx = items.length - 1; idx >= 0; idx--) {
             var itemObj = items[idx];
             var item = itemObj.item;
-            var indexInLayer = items.length - idx;  // 1-based reversed index
+            var indexInLayer = items.length - idx;
 
             log("Processing: " + item.name + " (type: " + item.typename + ", layer: " + layerName + ")");
 
             try {
-                // Parse name
-                var parsed = parseItemName(item.name);
+                var parsed = parseItemName(item.name,activeArtboard.name);
                 var imageName = parsed.imageName;
                 var elementTypeFromName = parsed.type;
                 log("  parsed: imageName=" + imageName + ", type=" + elementTypeFromName);
 
-                // Get bounds
-                var bounds;
-                if (useGeometricBounds) {
-                    bounds = safeGet(item, "geometricBounds");
-                } else {
-                    bounds = safeGet(item, "visibleBounds");
-                }
+                var bounds = getItemEffectiveBounds(item);
                 if (!bounds || bounds.length < 4) {
                     throw new Error("Bounds not available");
                 }
@@ -248,18 +308,26 @@ function main() {
                 var xOffsetPct = (imgX / artboardWidth) * 100;
                 var yOffsetPct = (imgY / artboardHeight) * 100;
 
-                var anchor = "top-left";
+                log("  bounds: left=" + left + ", top=" + top + ", right=" + right + ", bottom=" + bottom);
+                log("  imgWidth=" + imgWidth + ", imgHeight=" + imgHeight);
+                log("  imgX=" + imgX + ", imgY=" + imgY);
+                log("  ratio=" + ratio + ", widthPct=" + widthPct + ", heightPct=" + heightPct);
+                log("  xOffsetPct=" + xOffsetPct + ", yOffsetPct=" + yOffsetPct);
 
-                // Color and font size
-                var colorValue = "";
+                var anchor = "top-left";
+                var bgType = "";
+                var backgroundColor = "";
                 var fontSizePct = "";
 
                 if (elementTypeFromName === "banner") {
-                    colorValue = getItemFillColor(item);
-                    log("  banner color: " + colorValue);
+                    bgType = "color";
+                    backgroundColor = getItemFillColor(item);
+                    log("  banner bg_color: " + backgroundColor);
                 } else if (elementTypeFromName === "bannerShopName") {
+                    bgType = "";
+                    backgroundColor = "";
                     if (item.typename === "TextFrame") {
-                        colorValue = getTextColor(item);
+                        backgroundColor = getTextColor(item);
                         try {
                             var charAttr = safeGet(item.textRange, "characterAttributes");
                             if (charAttr && charAttr.size) {
@@ -267,9 +335,12 @@ function main() {
                             }
                         } catch (e) { /* ignore */ }
                     }
-                    log("  bannerShopName color: " + colorValue + ", fontSizePct: " + fontSizePct);
+                } else if (elementTypeFromName === "bannerLogo") {
+                    bgType = "";
+                    backgroundColor = "";
                 } else {
-                    // "image" or "bannerLogo" – no color extraction
+                    bgType = "image";
+                    backgroundColor = "";
                     if (item.typename === "TextFrame") {
                         try {
                             var charAttr = safeGet(item.textRange, "characterAttributes");
@@ -280,8 +351,7 @@ function main() {
                     }
                 }
 
-                // If text frame and font size not set yet
-                if (fontSizePct === "" && item.typename === "TextFrame") {
+                if (item.typename === "TextFrame" && fontSizePct === "") {
                     try {
                         var charAttr = safeGet(item.textRange, "characterAttributes");
                         if (charAttr && charAttr.size) {
@@ -290,7 +360,6 @@ function main() {
                     } catch (e) { /* ignore */ }
                 }
 
-                // Round numeric values to 2 decimals
                 function round2(val) {
                     if (typeof val !== "number") return val;
                     return Math.round(val * 100) / 100;
@@ -300,9 +369,10 @@ function main() {
                     activeArtboard.name,
                     layerName,
                     elementTypeFromName,
-                    colorValue,
+                    bgType,
+                    backgroundColor,
                     imageName,
-                    indexInLayer,                     // integer
+                    indexInLayer,
                     anchor,
                     round2(artboardWidth),
                     round2(artboardHeight),
@@ -318,7 +388,6 @@ function main() {
                     round2(fontSizePct)
                 ];
 
-                // Build CSV row
                 var escapedRow = "";
                 for (var f = 0; f < rowValues.length; f++) {
                     var field = rowValues[f];
@@ -344,15 +413,13 @@ function main() {
         }
     }
 
-    // Save CSV
     var desktop = Folder.desktop;
-    var csvFile = new File(desktop + "/artboard_export.csv");
+    var csvFile = new File(desktop + "/artboard_export_need_check.csv");
     csvFile.open("w");
     csvFile.encoding = "UTF-8";
     csvFile.write(csvRows.join("\n"));
     csvFile.close();
 
-    // Save errors if any
     if (errors.length > 0) {
         var errorFile = new File(desktop + "/artboard_export_errors.txt");
         errorFile.open("w");
@@ -366,7 +433,6 @@ function main() {
         errorFile.close();
     }
 
-    // Final alert
     alert("تم التصدير إلى:\n" + csvFile.fsName +
         "\nعدد العناصر الإجمالي: " + totalItems +
         (errors.length ? "\nأخطاء: " + errors.length + " (انظر ملف الأخطاء)" : ""));

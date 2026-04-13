@@ -3,6 +3,9 @@ import logging
 import re
 from typing import List, Tuple, Optional
 
+def px_to_cm(px, dpi):
+    return (px / dpi) * 2.54
+
 def cm_to_pixels(cm: float, dpi: int = 72) -> int:
     """
     تحويل السنتيمتر إلى بكسل بناءً على دقة الطباعة (DPI).

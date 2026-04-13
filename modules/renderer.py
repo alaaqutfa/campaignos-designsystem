@@ -2,52 +2,29 @@ import os
 from PIL import Image, ImageDraw, ImageFont
 import arabic_reshaper
 from bidi.algorithm import get_display
-import re
+import logging
 from typing import Dict, Any, List, Tuple, Optional
+from modules.utils import cm_to_pixels
+
+logger = logging.getLogger(__name__)
 
 
 class DesignRenderer:
     def __init__(self, layout_config: Dict[str, Any], assets_path: str = "./assets"):
-        """
-        Args:
-            layout_config: قاموس التكوين (محمل من config_layout.yaml)
-            assets_path: المسار إلى مجلد الأصول (صور، خطوط، أيقونات)
-        """
         self.config = layout_config
         self.assets = assets_path
-        self.fonts_cache = {}  # تخزين مؤقت للخطوط لتجنب إعادة التحميل
+        self.fonts_cache = {}
 
     def _reshape(self, text: str) -> str:
-        """
-        تشكيل النص العربي وعكس اتجاهه للعرض الصحيح في Pillow.
-
-        Args:
-            text: النص الأصلي (قد يحتوي على عربية وإنجليزية)
-
-        Returns:
-            النص المعاد تشكيله وجاهز للعرض
-        """
         reshaped = arabic_reshaper.reshape(text)
         return get_display(reshaped)
 
     def _get_font(self, font_name: str, size: int) -> ImageFont.FreeTypeFont:
-        """
-        تحميل خط من مجلد assets/fonts مع التخزين المؤقت.
-
-        Args:
-            font_name: اسم ملف الخط (مثل 'NotoNaskhArabic-Regular.ttf')
-            size: حجم الخط بالبكسل
-
-        Returns:
-            كائن الخط من Pillow
-        """
         cache_key = f"{font_name}_{size}"
         if cache_key in self.fonts_cache:
             return self.fonts_cache[cache_key]
-
         font_path = os.path.join(self.assets, "fonts", font_name)
         if not os.path.exists(font_path):
-            # محاولة استخدام خط النظام الافتراضي كبديل
             try:
                 font = ImageFont.truetype("arial.ttf", size)
             except:
@@ -57,423 +34,273 @@ class DesignRenderer:
         self.fonts_cache[cache_key] = font
         return font
 
-    def _parse_bold_segments(self, text: str) -> List[Tuple[str, bool]]:
-        """
-        يقسم النص إلى أجزاء عادية وأجزاء عريضة (الأرقام والوحدات).
-        الأرقام وما يتبعها من وحدات (مثل Hz, K, mAh, سنوات) تعتبر عريضة.
-
-        Args:
-            text: النص الكامل لعبارة واحدة
-
-        Returns:
-            قائمة من الأزواج (النص, هل هو عريض)
-        """
-        # وحدات محتملة بالعربية والإنجليزية
-        units = r"(?:[a-zA-Z]+|سنة|سنوات|Hz|K|mAh|G|مم|سم|بكسل|ميجابكسل|جيجا|تيترا|سنة|شهور|أيام)"
-        # النمط: رقم (قد يكون عشري) متبوعًا اختياريًا بمسافة ووحدة
-        pattern = r"(\d+(?:\.\d+)?\s*(?:" + units + ")?)"
-
-        segments = []
-        last_end = 0
-        for match in re.finditer(pattern, text):
-            start, end = match.span()
-            # جزء عادي قبل هذا المطابقة
-            if start > last_end:
-                segments.append((text[last_end:start], False))
-            # الجزء المطابق (عريض)
-            segments.append((text[start:end], True))
-            last_end = end
-        # باقي النص بعد آخر مطابقة
-        if last_end < len(text):
-            segments.append((text[last_end:], False))
-        return segments
-
-    def _measure_text(self, draw: ImageDraw, text: str, font: ImageFont) -> int:
-        """
-        قياس عرض نص معين بعد تشكيله.
-
-        Args:
-            draw: كائن الرسم (لقياس النص)
-            text: النص الأصلي
-            font: الخط المستخدم
-
-        Returns:
-            العرض بالبكسل
-        """
-        reshaped = self._reshape(text)
-        bbox = draw.textbbox((0, 0), reshaped, font=font)
-        return bbox[2] - bbox[0]
-
-    def _render_phrase(
-        self,
-        draw: ImageDraw,
-        x: int,
-        y: int,
-        phrase: str,
-        regular_font: ImageFont,
-        bold_font: ImageFont,
-        color: str,
-        anchor: str = "rt",
-    ) -> int:
-        """
-        رسم عبارة واحدة (قد تحتوي على أجزاء عريضة) وإرجاع عرضها الإجمالي.
-
-        تعمل هذه الدالة عن طريق:
-        1. تحليل العبارة إلى أجزاء.
-        2. قياس عرض كل جزء.
-        3. رسم الأجزاء من اليمين إلى اليسار (باتجاه RTL) لأن anchor = 'rt'.
-
-        Args:
-            draw: كائن الرسم
-            x: الإحداثي الأفقي لنقطة الارتكاز (اليمين)
-            y: الإحداثي الرأسي
-            phrase: العبارة المراد رسمها
-            regular_font: الخط العادي
-            bold_font: الخط العريض
-            color: لون النص (مثل '#000000')
-            anchor: نقطة الارتكاز في النص (rt = right-top)
-
-        Returns:
-            العرض الإجمالي للعبارة بالبكسل
-        """
-        segments = self._parse_bold_segments(phrase)
-
-        # قياس العرض الإجمالي
-        total_width = 0
-        for seg_text, is_bold in segments:
-            font = bold_font if is_bold else regular_font
-            total_width += self._measure_text(draw, seg_text, font)
-
-        # رسم الأجزاء من اليمين إلى اليسار
-        current_x = x
-        for seg_text, is_bold in reversed(segments):  # نعكس لأننا نرسم من اليمين
-            font = bold_font if is_bold else regular_font
-            reshaped = self._reshape(seg_text)
-            # قياس هذا الجزء
-            seg_width = self._measure_text(draw, seg_text, font)
-            # رسم الجزء
-            draw.text((current_x, y), reshaped, font=font, fill=color, anchor="rt")
-            # تحريك المؤشر لليسار بمقدار عرض الجزء
-            current_x -= seg_width
-
-        return total_width
-
-    def _draw_background(
-        self, img: Image, bg_cfg: Dict[str, Any], width: int, height: int
-    ):
-        """
-        رسم الخلفية حسب التكوين (لون، تدرج، أو صورة).
-
-        Args:
-            img: الصورة الرئيسية
-            bg_cfg: إعدادات الخلفية
-            width, height: أبعاد الصورة
-        """
-        bg_type = bg_cfg.get("type", "color")
-        if bg_type == "color":
-            # خلفية بلون واحد
-            color = bg_cfg.get("color", "#FFFFFF")
-            # إذا كان اللون عبارة عن سلسلة تبدأ بـ #، نفترض أنها hex
-            if isinstance(color, str) and color.startswith("#"):
-                img.paste(color, [0, 0, width, height])
-            else:
-                # قد يكون RGB tuple
-                img.paste(color, [0, 0, width, height])
-        elif bg_type == "gradient":
-            # يمكن تطويرها لاحقاً
-            color1 = bg_cfg.get("color1", "#FFFFFF")
-            color2 = bg_cfg.get("color2", "#CCCCCC")
-            # رسم تدرج خطي عمودي
-            draw = ImageDraw.Draw(img)
-            for y in range(height):
-                r = int(y / height * 255)
-                # مزج بسيط
-                draw.line([(0, y), (width, y)], fill=(r, r, r))
-        elif bg_type == "image":
-            # صورة خلفية
-            img_path = os.path.join(self.assets, bg_cfg.get("image", "background.png"))
-            if os.path.exists(img_path):
-                bg_img = Image.open(img_path).convert("RGB")
-                bg_img = bg_img.resize((width, height), Image.Resampling.LANCZOS)
-                img.paste(bg_img, (0, 0))
-            else:
-                # إذا لم توجد الصورة، نستخدم لون افتراضي
-                img.paste("#FFFFFF", [0, 0, width, height])
-
-    def _draw_mobile_image(
-        self,
-        draw: ImageDraw,
-        img: Image,
-        mobile_cfg: Dict[str, Any],
-        width: int,
-        height: int,
-    ):
-        """
-        وضع صورة الموبايل في التصميم.
-
-        Args:
-            draw: كائن الرسم (غير مستخدم هنا ولكن للاتساق)
-            img: الصورة الرئيسية (سنقوم باللصق عليها)
-            mobile_cfg: إعدادات صورة الموبايل
-            width, height: أبعاد التصميم
-        """
-        img_path = os.path.join(self.assets, mobile_cfg.get("image", "mobile.png"))
+    def _draw_image_layer(self, img, layer, width, height):
+        img_path = os.path.join(self.assets, layer.get("image", "missing.png"))
         if not os.path.exists(img_path):
-            return  # لا توجد صورة
+            return
 
-        mobile_img = Image.open(img_path).convert("RGBA")
+        Image.MAX_IMAGE_PIXELS = None
+        orig_img = Image.open(img_path).convert("RGBA")
+        orig_w, orig_h = orig_img.size
 
-        # حساب عرض الصورة كنسبة من العرض الكلي
-        mobile_w = int(mobile_cfg["width_pct"] / 100 * width)
-        mobile_img = mobile_img.resize(
-            (mobile_w, int(mobile_img.height * mobile_w / mobile_img.width)),
-            Image.Resampling.LANCZOS,
-        )
+        # أبعاد الإطار المطلوب من YAML
+        target_w = None
+        target_h = None
+        if "width_pct" in layer:
+            target_w = int(layer["width_pct"] / 100 * width)
+        if "height_pct" in layer:
+            target_h = int(layer["height_pct"] / 100 * height)
 
-        # تحديد نقطة الارتكاز (anchor) والإزاحة
-        anchor = mobile_cfg.get("anchor", "center-center")
-        x_offset = int(mobile_cfg.get("x_offset_pct", 0) / 100 * width)
-        y_offset = int(mobile_cfg.get("y_offset_pct", 0) / 100 * height)
+        fit = layer.get("fit", "fill").lower()  # القيمة الافتراضية cover
+
+        # الحالة 1: لدينا عرض وارتفاع -> نطبق استراتيجية fit
+        if target_w is not None and target_h is not None:
+            if fit == "contain":
+                scale = min(target_w / orig_w, target_h / orig_h)
+                new_w = int(orig_w * scale)
+                new_h = int(orig_h * scale)
+                scaled_img = orig_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+                canvas = Image.new("RGBA", (target_w, target_h), (0, 0, 0, 0))
+                left = (target_w - new_w) // 2
+                top = (target_h - new_h) // 2
+                canvas.paste(scaled_img, (left, top))
+                layer_img = canvas
+
+            elif fit == "fill":
+                # تشويه النسبة لملء الإطار
+                layer_img = orig_img.resize((target_w, target_h), Image.Resampling.LANCZOS)
+
+            else:  # cover (الافتراضي)
+                scale = max(target_w / orig_w, target_h / orig_h)
+                new_w = int(orig_w * scale)
+                new_h = int(orig_h * scale)
+                scaled_img = orig_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+                left = (new_w - target_w) // 2
+                top = (new_h - target_h) // 2
+                cropped = scaled_img.crop((left, top, left + target_w, top + target_h))
+                layer_img = cropped
+
+        # الحالة 2: عرض فقط -> نحافظ على النسبة
+        elif target_w is not None:
+            new_h = int(target_w * orig_h / orig_w)
+            layer_img = orig_img.resize((target_w, new_h), Image.Resampling.LANCZOS)
+
+        # الحالة 3: ارتفاع فقط -> نحافظ على النسبة
+        elif target_h is not None:
+            new_w = int(target_h * orig_w / orig_h)
+            layer_img = orig_img.resize((new_w, target_h), Image.Resampling.LANCZOS)
+
+        else:
+            layer_img = orig_img
+
+        # رسم الطبقة (نفس الكود القديم)
+        w_layer, h_layer = layer_img.size
+        anchor = layer.get("anchor", "top-left")
+        x_offset = int(layer.get("x_offset_pct", 0) / 100 * width)
+        y_offset = int(layer.get("y_offset_pct", 0) / 100 * height)
 
         if anchor == "right-center":
-            x = width - mobile_img.width + x_offset
-            y = (height - mobile_img.height) // 2 + y_offset
+            x = width - w_layer + x_offset
+            y = (height - h_layer) // 2 + y_offset
         elif anchor == "left-center":
             x = x_offset
-            y = (height - mobile_img.height) // 2 + y_offset
+            y = (height - h_layer) // 2 + y_offset
         elif anchor == "center":
-            x = (width - mobile_img.width) // 2 + x_offset
-            y = (height - mobile_img.height) // 2 + y_offset
+            x = (width - w_layer) // 2 + x_offset
+            y = (height - h_layer) // 2 + y_offset
         elif anchor == "top-right":
-            x = width - mobile_img.width + x_offset
+            x = width - w_layer + x_offset
             y = y_offset
         elif anchor == "top-left":
             x = x_offset
             y = y_offset
         elif anchor == "bottom-right":
-            x = width - mobile_img.width + x_offset
-            y = height - mobile_img.height + y_offset
+            x = width - w_layer + x_offset
+            y = height - h_layer + y_offset
         elif anchor == "bottom-left":
             x = x_offset
-            y = height - mobile_img.height + y_offset
-        else:
-            # افتراضي: right-center
-            x = width - mobile_img.width + x_offset
-            y = (height - mobile_img.height) // 2 + y_offset
-
-        img.paste(mobile_img, (x, y), mobile_img)
-
-    def _draw_logo(
-        self,
-        draw: ImageDraw,
-        img: Image,
-        logo_cfg: Dict[str, Any],
-        width: int,
-        height: int,
-    ):
-        """
-        وضع الشعار الرئيسي.
-
-        Args:
-            draw: كائن الرسم
-            img: الصورة الرئيسية
-            logo_cfg: إعدادات الشعار
-            width, height: أبعاد التصميم
-        """
-        img_path = os.path.join(self.assets, logo_cfg.get("image", "logo.png"))
-        if not os.path.exists(img_path):
-            return
-
-        logo_img = Image.open(img_path).convert("RGBA")
-        logo_w = int(logo_cfg["width_pct"] / 100 * width)
-        logo_img = logo_img.resize(
-            (logo_w, int(logo_img.height * logo_w / logo_img.width)),
-            Image.Resampling.LANCZOS,
-        )
-
-        anchor = logo_cfg.get("anchor", "top-left")
-        x_offset = int(logo_cfg.get("x_offset_pct", 0) / 100 * width)
-        y_offset = int(logo_cfg.get("y_offset_pct", 0) / 100 * height)
-
-        # تحديد الإحداثيات بناءً على نقطة الارتكاز
-        if anchor == "top-left":
-            x = x_offset
-            y = y_offset
-        elif anchor == "top-right":
-            x = width - logo_img.width + x_offset
-            y = y_offset
-        elif anchor == "bottom-left":
-            x = x_offset
-            y = height - logo_img.height + y_offset
-        elif anchor == "bottom-right":
-            x = width - logo_img.width + x_offset
-            y = height - logo_img.height + y_offset
-        elif anchor == "center":
-            x = (width - logo_img.width) // 2 + x_offset
-            y = (height - logo_img.height) // 2 + y_offset
+            y = height - h_layer + y_offset
         else:
             x = x_offset
             y = y_offset
 
-        img.paste(logo_img, (x, y), logo_img)
+        img.paste(layer_img, (x, y), layer_img)
 
-    def _draw_icons(
-        self,
-        draw: ImageDraw,
-        img: Image,
-        icons_cfg: List[Dict[str, Any]],
-        width: int,
-        height: int,
+    def _draw_background(
+        self, img: Image, bg_cfg: Dict[str, Any], canvas_width: int, canvas_height: int
     ):
-        """
-        Args:
-            draw: كائن الرسم
-            img: الصورة الرئيسية
-            icons_cfg: قائمة إعدادات الأيقونات
-            width, height: أبعاد التصميم
-        """
-        for icon_cfg in icons_cfg:
-            img_name = icon_cfg.get("image", "icon.png")
-            img_path = os.path.join(self.assets, "icons", img_name)
-            if not os.path.exists(img_path):
-                continue
-
-            icon_img = Image.open(img_path).convert("RGBA")
-            icon_w = int(icon_cfg["width_pct"] / 100 * width)
-            icon_h = int(icon_cfg["height_pct"] / 100 * height)
-            icon_img = icon_img.resize((icon_w, icon_h), Image.Resampling.LANCZOS)
-
-            anchor = icon_cfg.get("anchor", "top-left")
-            x_offset = int(icon_cfg.get("x_offset_pct", 0) / 100 * width)
-            y_offset = int(icon_cfg.get("y_offset_pct", 0) / 100 * height)
-
-            if anchor == "bottom-left":
-                x = x_offset
-                y = height - icon_img.height + y_offset
-            elif anchor == "bottom-right":
-                x = width - icon_img.width + x_offset
-                y = height - icon_img.height + y_offset
-            elif anchor == "top-left":
-                x = x_offset
-                y = y_offset
+        bg_type = bg_cfg.get("type", "color")
+        if bg_type == "color":
+            color = bg_cfg.get("color", "#FFFFFF")
+            img.paste(color, [0, 0, canvas_width, canvas_height])
+        elif bg_type == "image":
+            img_path = os.path.join(self.assets, bg_cfg.get("image", "background.png"))
+            if os.path.exists(img_path):
+                Image.MAX_IMAGE_PIXELS = None
+                bg_img = Image.open(img_path).convert("RGB")
+                bg_img = bg_img.resize(
+                    (canvas_width, canvas_height), Image.Resampling.LANCZOS
+                )
+                img.paste(bg_img, (0, 0))
             else:
-                x = x_offset
-                y = height - icon_img.height + y_offset
-
-            img.paste(icon_img, (x, y), icon_img)
+                img.paste("#FFFFFF", [0, 0, canvas_width, canvas_height])
 
     def _draw_banner(
         self,
         draw,
         img,
         banner_cfg,
-        width,
-        height,
+        original_width,
+        original_height,
+        margin,
         shop_name,
     ):
-        # ======================
-        # حساب أبعاد البانر
-        # ======================
-        banner_w = int(banner_cfg["width_pct"] / 100 * width)
-        banner_h = int(banner_cfg["height_pct"] / 100 * height)
+        banner_w = int(banner_cfg["width_pct"] / 100 * original_width)
+        banner_h = int(banner_cfg["height_pct"] / 100 * original_height)
 
-        # ======================
-        # تحديد مكان البانر
-        # ======================
         if banner_cfg.get("center"):
-            center_x = width // 2
-            center_y = height // 2
-
+            center_x = original_width // 2
+            center_y = original_height // 2
             banner_x1 = center_x - banner_w // 2
             banner_y1 = center_y - banner_h // 2
         else:
             banner_x1 = 0
             banner_y1 = 0
 
+        # إضافة margin لموقع البانر
+        # banner_x1 += margin
+        # banner_y1 += margin
         banner_x2 = banner_x1 + banner_w
         banner_y2 = banner_y1 + banner_h
 
-        # رسم البانر
         draw.rectangle(
             [(banner_x1, banner_y1), (banner_x2, banner_y2)],
             fill=banner_cfg["background_color"],
         )
 
-        # ======================
-        # تحميل الشعار
-        # ======================
         logo_cfg = banner_cfg.get("logo", {})
         logo_img = None
         logo_w = logo_h = 0
 
         logo_img_path = os.path.join(self.assets, logo_cfg.get("image", "logo.png"))
         if os.path.exists(logo_img_path):
+            Image.MAX_IMAGE_PIXELS = None
             logo_img = Image.open(logo_img_path).convert("RGBA")
-
-            logo_w = int(logo_cfg.get("width_pct", 10) / 100 * width)
+            logo_w = int(logo_cfg.get("width_pct", 10) / 100 * original_width)
             logo_h = int(logo_img.height * logo_w / logo_img.width)
-
             logo_img = logo_img.resize((logo_w, logo_h), Image.Resampling.LANCZOS)
 
-        # ======================
-        # إعداد النص
-        # ======================
         text_cfg = banner_cfg.get("shop_name", {})
         font_size = int(text_cfg.get("font_size_pct", 5) / 100 * banner_h)
-        font = self._get_font("NotoNaskhArabic-Bold.ttf", font_size)
+        font = self._get_font("Bahij_TheSansArabic-Bold.ttf", font_size)
         color = text_cfg.get("color", "#FFFFFF")
-
         text = self._reshape(shop_name)
 
         bbox = draw.textbbox((0, 0), text, font=font)
         text_w = bbox[2] - bbox[0]
         text_h = bbox[3] - bbox[1]
+        
+        banner_type = banner_cfg.get("banner_type", "h").lower()
 
-        # ======================
-        # مواقع أولية داخل البانر
-        # ======================
-        x_logo = banner_x1 + int(logo_cfg.get("x_offset_pct", 2) / 100 * banner_w)
-        y_logo = banner_y1 + int(logo_cfg.get("y_offset_pct", 10) / 100 * banner_h)
+        # المواضع داخل البانر (بالنسبة إلى banner_x1, banner_y1)
+        if banner_type == "h":
+            spacing = int(0.04 * banner_w)
+            x_logo = banner_x1 + int(logo_cfg.get("x_offset_pct", 2) / 100 * banner_w)
+            y_logo = banner_y1 + int(logo_cfg.get("y_offset_pct", 10) / 100 * banner_h)
+            x_text = x_logo + logo_w + spacing
+            y_text = (y_logo + (logo_h - text_h) // 2) + 5
+        elif banner_type == "s7":
+            spacing = int(0.03 * banner_w)
+            x_logo = banner_x1 + int(logo_cfg.get("x_offset_pct", 2) / 100 * banner_w)
+            y_logo = banner_y1 + int(logo_cfg.get("y_offset_pct", 10) / 100 * banner_h)
+            x_text = x_logo + logo_w + spacing
+            y_text = (y_logo + (logo_h - text_h) // 2) + 5
+        elif banner_type == "s8":
+            spacing = int(0.02 * banner_w)
+            x_logo = banner_x1 + int(logo_cfg.get("x_offset_pct", 2) / 100 * banner_w)
+            y_logo = banner_y1 + int(logo_cfg.get("y_offset_pct", 10) / 100 * banner_h)
+            x_text = x_logo + logo_w + spacing
+            y_text = (y_logo + (logo_h - text_h) // 2) + 5
+        else:
+            spacing = int(0.08 * banner_h)
+            x_logo = banner_x1 + int(logo_cfg.get("x_offset_pct", 2) / 100 * banner_w)
+            y_logo = banner_y1 + int(logo_cfg.get("y_offset_pct", 10) / 100 * banner_h)
+            x_text = banner_x1 + int(text_cfg.get("x_offset_pct", 50) / 100 * banner_w)
+            y_text = y_logo + logo_h + spacing
+            x_text = x_logo + (logo_w - text_w) // 2
 
-        x_text = banner_x1 + int(text_cfg.get("x_offset_pct", 50) / 100 * banner_w)
-        y_text = banner_y1 + int(text_cfg.get("y_offset_pct", 50) / 100 * banner_h)
-
-        # ======================
-        # حساب bounding box للمجموعة
-        # ======================
         elements = []
-
         if logo_img:
             elements.append((x_logo, y_logo, logo_w, logo_h))
-
         elements.append((x_text, y_text, text_w, text_h))
 
         group_x1 = min(e[0] for e in elements)
         group_y1 = min(e[1] for e in elements)
         group_x2 = max(e[0] + e[2] for e in elements)
         group_y2 = max(e[1] + e[3] for e in elements)
-
         group_w = group_x2 - group_x1
         group_h = group_y2 - group_y1
 
-        # ======================
-        # توسيط المجموعة داخل البانر
-        # ======================
+        max_width = 0.85 * banner_w
+        scale_factor = 1.0
+        if group_w > max_width:
+            scale_factor = max_width / group_w
+            new_font_size = int(font_size * scale_factor)
+            font = self._get_font("AktivGroteskEx_Md.ttf", new_font_size)
+            bbox = draw.textbbox((0, 0), text, font=font)
+            text_w = bbox[2] - bbox[0]
+            text_h = bbox[3] - bbox[1]
+            logo_w = int(logo_w * scale_factor)
+            logo_h = int(logo_h * scale_factor)
+            if logo_img:
+                logo_img = logo_img.resize((logo_w, logo_h), Image.Resampling.LANCZOS)
+
+            if banner_type == "h":
+                x_logo = banner_x1 + int(
+                    logo_cfg.get("x_offset_pct", 2) / 100 * banner_w
+                )
+                y_logo = banner_y1 + int(
+                    logo_cfg.get("y_offset_pct", 10) / 100 * banner_h
+                )
+                x_text = x_logo + logo_w + spacing
+                y_text = y_logo + (logo_h - text_h) // 2
+            else:
+                x_logo = banner_x1 + int(
+                    logo_cfg.get("x_offset_pct", 2) / 100 * banner_w
+                )
+                y_logo = banner_y1 + int(
+                    logo_cfg.get("y_offset_pct", 10) / 100 * banner_h
+                )
+                x_text = banner_x1 + int(
+                    text_cfg.get("x_offset_pct", 50) / 100 * banner_w
+                )
+                y_text = y_logo + logo_h + spacing
+                x_text = x_logo + (logo_w - text_w) // 2
+                
+            
+
+            elements = []
+            if logo_img:
+                elements.append((x_logo, y_logo, logo_w, logo_h))
+            elements.append((x_text, y_text, text_w, text_h))
+            group_x1 = min(e[0] for e in elements)
+            group_y1 = min(e[1] for e in elements)
+            group_x2 = max(e[0] + e[2] for e in elements)
+            group_y2 = max(e[1] + e[3] for e in elements)
+            group_w = group_x2 - group_x1
+            group_h = group_y2 - group_y1
+
         banner_center_x = banner_x1 + banner_w // 2
         banner_center_y = banner_y1 + banner_h // 2
 
         offset_x = banner_center_x - (group_x1 + group_w // 2)
         offset_y = banner_center_y - (group_y1 + group_h // 2)
 
-        # تطبيق الإزاحة
         x_logo += offset_x
         y_logo += offset_y
         x_text += offset_x
         y_text += offset_y
 
-        # ======================
-        # الرسم النهائي
-        # ======================
         if logo_img:
             img.paste(logo_img, (x_logo, y_logo), logo_img)
 
@@ -485,6 +312,75 @@ class DesignRenderer:
             anchor="lt",
         )
 
+    def _create_label_image(
+        self,
+        text: str,
+        max_width: int,
+        max_height: int,
+        font_name: str = "Bahij_TheSansArabic-Bold.ttf",
+        padding: int = 12,
+    ) -> Tuple[Image.Image, int, int]:
+        """
+        إنشاء صورة النص مع تصغير حجم الخط تلقائياً.
+        بدون تدوير - التدوير يتم بعد ذلك.
+        """
+        for size in range(200, 9, -5):
+            font = self._get_font(font_name, size)
+            dummy = Image.new("RGB", (1, 1))
+            d = ImageDraw.Draw(dummy)
+            bbox = d.textbbox((0, 0), text, font=font)
+            text_w = bbox[2] - bbox[0]
+            text_h = bbox[3] - bbox[1]
+
+            if text_w <= max_width and text_h <= max_height:
+                img_w = text_w + 2 * padding
+                img_h = text_h + 2 * padding
+                text_img = Image.new("RGBA", (img_w, img_h), (255, 255, 255, 0))
+                draw_text = ImageDraw.Draw(text_img)
+                draw_text.text(
+                    (padding - bbox[0], padding - bbox[1]),
+                    text,
+                    fill=(255, 0, 0, 255),
+                    font=font,
+                )
+                # print(f"      ✓ Font size {size} fits: {text_w}x{text_h}")
+                return text_img, img_w, img_h
+
+        # print(f"      ⚠️ No font fits! Using smallest (10)")
+        font = self._get_font(font_name, 10)
+        dummy = Image.new("RGB", (1, 1))
+        d = ImageDraw.Draw(dummy)
+        bbox = d.textbbox((0, 0), text, font=font)
+        text_w = bbox[2] - bbox[0]
+        text_h = bbox[3] - bbox[1]
+        img_w = text_w + 2 * padding
+        img_h = text_h + 2 * padding
+        text_img = Image.new("RGBA", (img_w, img_h), (255, 255, 255, 0))
+        draw_text = ImageDraw.Draw(text_img)
+        draw_text.text(
+            (padding - bbox[0], padding - bbox[1]),
+            text,
+            fill=(255, 0, 0, 255),
+            font=font,
+        )
+        return text_img, img_w, img_h
+
+    def _draw_full_background(
+        self, img: Image, layer: Dict[str, Any], canvas_width: int, canvas_height: int
+    ):
+        """رسم صورة الخلفية على كامل القماش (بدون إزاحة margin)"""
+        img_path = os.path.join(self.assets, layer.get("image", "missing.png"))
+        if not os.path.exists(img_path):
+            # إذا لم توجد الصورة، نستخدم لون أبيض كخلفية
+            img.paste("#FFFFFF", [0, 0, canvas_width, canvas_height])
+            return
+
+        Image.MAX_IMAGE_PIXELS = None
+        bg_img = Image.open(img_path).convert("RGB")
+        # تغيير حجم الصورة لتملأ القماش بالكامل
+        bg_img = bg_img.resize((canvas_width, canvas_height), Image.Resampling.LANCZOS)
+        img.paste(bg_img, (0, 0))
+
     def render(
         self,
         width: int,
@@ -492,56 +388,162 @@ class DesignRenderer:
         template: str,
         shop_name: Optional[str] = None,
         preview: bool = False,
+        safety_margin: int = 0,
+        add_label: bool = False,
+        label_text: str = "",
+        dpi: int = 72,
     ) -> Image.Image:
-        """
-        Args:
-            width: عرض التصميم بالبكسل
-            height: ارتفاع التصميم بالبكسل
-            template: اسم القالب المطابق (مثل S2, default)
-            shop_name: اسم المحل (إذا كان None، لا يضاف شريط)
-            preview: إذا كان True، يتم تصغير الصورة للعرض السريع
-        """
-        # تحميل إعدادات القالب (إذا لم يوجد، نستخدم default)
         tmpl_cfg = self.config.get(template, self.config.get("default", {}))
 
-        # إنشاء صورة فارغة
-        img = Image.new("RGB", (width, height), "white")
+        # حفظ الأبعاد الأصلية للتصميم (بدون margin)
+        original_w = width
+        original_h = height
+
+        # الأبعاد النهائية للقماش بعد إضافة margin
+        canvas_w = width + 2 * safety_margin
+        canvas_h = height + 2 * safety_margin
+
+        # إنشاء الصورة الرئيسية بالحجم الموسع
+        img = Image.new("RGB", (canvas_w, canvas_h), "white")
         draw = ImageDraw.Draw(img)
 
-        # رسم الخلفية
-        if "background" in tmpl_cfg:
-            self._draw_background(img, tmpl_cfg["background"], width, height)
+        # قائمة الطبقات من التكوين
+        if "images" in tmpl_cfg and isinstance(tmpl_cfg["images"], list):
+            all_layers = tmpl_cfg["images"]
+        else:
+            all_layers = []
+            if "mobile_image" in tmpl_cfg:
+                all_layers.append(tmpl_cfg["mobile_image"])
+            if "logo" in tmpl_cfg:
+                all_layers.append(tmpl_cfg["logo"])
+            if "icons" in tmpl_cfg:
+                all_layers.extend(tmpl_cfg["icons"])
 
-        # رسم الخلفية
-        if "background2" in tmpl_cfg:
-            self._draw_background(img, tmpl_cfg["background2"], width, height)
+        # فصل طبقة الخلفية (التي تحوي "bg" في اسم الصورة)
+        bg_layer = None
+        other_layers = []
+        for layer in all_layers:
+            img_path = layer.get("image", "")
+            if "bg" in img_path.lower():  # البحث عن "bg" غير حساس للحالة
+                bg_layer = layer
+            else:
+                other_layers.append(layer)
 
-        # رسم الأيقونات
-        if "icons" in tmpl_cfg and isinstance(tmpl_cfg["icons"], list):
-            self._draw_icons(draw, img, tmpl_cfg["icons"], width, height)
+        # رسم الخلفية (إذا وجدت) على كامل canvas (بدون margin)
+        if bg_layer:
+            # نستخدم دالة خاصة لرسم الخلفية على canvas كامل
+            self._draw_full_background(img, bg_layer, canvas_w, canvas_h)
+        else:
+            # إذا لم توجد طبقة bg، نرسم الخلفية من القسم القديم (background)
+            if "background" in tmpl_cfg:
+                self._draw_background(img, tmpl_cfg["background"], canvas_w, canvas_h)
 
-        # إضافة شريط اسم المحل إذا كان مطلوباً
+        # رسم باقي الطبقات مع إزاحة margin
+        for layer in other_layers:
+            self._draw_image_layer(img, layer, canvas_w, canvas_h)
+
+        # رسم البانر إذا وُجد
         if shop_name and "banner" in tmpl_cfg:
-            self._draw_banner(draw, img, tmpl_cfg["banner"], width, height, shop_name)
+            self._draw_banner(
+                draw,
+                img,
+                tmpl_cfg["banner"],
+                canvas_w,
+                canvas_h,
+                safety_margin,
+                shop_name,
+            )
 
-        # رسم صورة الموبايل
-        if "mobile_image" in tmpl_cfg:
-            self._draw_mobile_image(draw, img, tmpl_cfg["mobile_image"], width, height)
+        # طباعة معلومات debug (مثل السابق)
+        def px_to_cm(px, dpi_val):
+            return (px / dpi_val) * 2.54
 
-        # رسم صورة الموبايل
-        if "mobile_image2" in tmpl_cfg:
-            self._draw_mobile_image(draw, img, tmpl_cfg["mobile_image2"], width, height)
+        # print("\n" + "=" * 55)
+        # print("📐 RENDERER DEBUG INFO")
+        # print(
+        #     f"   Original: {original_w}x{original_h} px = {px_to_cm(original_w, dpi):.2f}x{px_to_cm(original_h, dpi):.2f} cm (DPI={dpi})"
+        # )
+        # if safety_margin > 0:
+            # print(f"   Safety margin: {px_to_cm(safety_margin, dpi):.2f} cm each side")
+            # print(
+            #     f"   Canvas after margin: {canvas_w}x{canvas_h} px = {px_to_cm(canvas_w, dpi):.2f}x{px_to_cm(canvas_h, dpi):.2f} cm"
+            # )
 
-        # رسم الشعار الرئيسي
-        if "logo" in tmpl_cfg:
-            self._draw_logo(draw, img, tmpl_cfg["logo"], width, height)
+        # ========== إضافة الـ Label (بدون تغيير) ==========
+        if add_label and label_text:
+            label_thickness_px = cm_to_pixels(5, dpi)
+            bg_color = "#FFFFFF"
+            text_color = "#FF0000"
+            max_ratio = 0.92
+            padding = max(10, int(dpi * 0.08))
 
-        # رسم الشعار الرئيسي 2
-        if "logo2" in tmpl_cfg:
-            self._draw_logo(draw, img, tmpl_cfg["logo2"], width, height)
+            shaped_text = self._reshape(label_text)
+            # print(f"\n🏷️ Label text: '{label_text}'")
+            # print(f"   Reshaped: '{shaped_text}'")
+            # print(f"   Thickness: {label_thickness_px} px (5 cm)")
 
-        # إذا كان preview، نصغر الصورة
+            # Portrait: label في الأعلى (شريط أفقي)
+            if canvas_h > canvas_w:
+                # print("   Orientation: Portrait (label on top)")
+                new_w = canvas_w
+                new_h = canvas_h + label_thickness_px
+                new_img = Image.new("RGB", (new_w, new_h), bg_color)
+                new_img.paste(img, (0, label_thickness_px))
+
+                label_width = new_w
+                label_height = label_thickness_px
+                max_text_width = int(max_ratio * label_width)
+                max_text_height = int(max_ratio * label_height)
+                # print(f"   Label area: {label_width}x{label_height} px")
+                # print(f"   Max text: {max_text_width}x{max_text_height} px")
+
+                text_img, img_w, img_h = self._create_label_image(
+                    shaped_text, max_text_width, max_text_height, padding=padding
+                )
+                x = (label_width - img_w) // 2
+                y = (label_height - img_h) // 2
+                # print(f"   Text image: {img_w}x{img_h} px, paste at ({x}, {y})")
+                new_img.paste(text_img, (x, y), text_img)
+                img = new_img
+
+            # Landscape: label على اليسار (شريط عمودي)
+            else:
+                # print("   Orientation: Landscape (label on left)")
+                new_w = canvas_w + label_thickness_px
+                new_h = canvas_h
+                new_img = Image.new("RGB", (new_w, new_h), bg_color)
+                new_img.paste(img, (label_thickness_px, 0))
+
+                label_width = label_thickness_px
+                label_height = new_h
+                max_original_width = int(max_ratio * label_height)
+                max_original_height = int(max_ratio * label_width)
+                # print(f"   Label area: {label_width}x{label_height} px")
+                # print(
+                #     f"   Max original text: {max_original_width}x{max_original_height} px"
+                # )
+
+                text_img, img_w, img_h = self._create_label_image(
+                    shaped_text,
+                    max_original_width,
+                    max_original_height,
+                    padding=padding,
+                )
+                rotated = text_img.rotate(-90, expand=True)
+                # print(f"   Original text image: {img_w}x{img_h} px")
+                # print(f"   Rotated text image: {rotated.width}x{rotated.height} px")
+                x = (label_width - rotated.width) // 2
+                y = (label_height - rotated.height) // 2
+                # print(f"   Paste at ({x}, {y})")
+                new_img.paste(rotated, (x, y), rotated)
+                img = new_img
+
+            # print("=" * 55 + "\n")
+
+        # تصغير الصورة للمعاينة إذا لزم الأمر
         if preview:
-            img.thumbnail((1080, int(1080 * height / width)), Image.Resampling.LANCZOS)
+            img.thumbnail(
+                (1080, int(1080 * img.height / img.width)), Image.Resampling.LANCZOS
+            )
 
         return img

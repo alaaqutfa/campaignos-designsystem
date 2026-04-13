@@ -2,162 +2,167 @@ import pandas as pd
 import yaml
 import numpy as np
 
-# قراءة ملف Excel
-df = pd.read_excel("artboard_export.xlsx", sheet_name="ورقة1")
 
-# استبدال القيم الخالية أو "-" بـ None
-df = df.replace({"-": None, np.nan: None})
+def convert_excel_to_yaml(excel_path, output_without_shop, output_with_shop):
+    df = pd.read_excel(excel_path, sheet_name="artboard_export_need_check")
+    df = df.replace({"-": None, np.nan: None})
 
-# تحويل الأعمدة المئوية إلى أرقام (مع التعامل مع الأخطاء)
-pct_cols = ['width_pct', 'height_pct', 'x_offset_pct', 'y_offset_pct', 'font_size_pct']
-for col in pct_cols:
-    if col in df.columns:
-        df[col] = pd.to_numeric(df[col], errors='coerce')
+    # numeric columns
+    pct_cols = [
+        "width_pct",
+        "height_pct",
+        "x_offset_pct",
+        "y_offset_pct",
+        "font_size_pct",
+    ]
+    for col in pct_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
 
-# دالة لتقريب أي قيمة رقمية إلى منزلتين عشريتين
-def round_number(x):
-    if isinstance(x, (float, np.floating)):
-        return round(float(x), 2)
-    elif isinstance(x, (int, np.integer)):
-        return round(float(x), 2)  # لتحويل الأعداد الصحيحة إلى أرقام عشرية أيضاً
-    return x
+    def deep_round(obj):
+        if isinstance(obj, dict):
+            return {k: deep_round(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [deep_round(item) for item in obj]
+        elif isinstance(obj, (float, np.floating)):
+            return round(obj, 2)
+        elif isinstance(obj, (int, np.integer)):
+            return round(float(obj), 2)
+        else:
+            return obj
 
-# دالة لتمرير على جميع العناصر وتطبيق التقريب
-def deep_round(obj):
-    if isinstance(obj, dict):
-        return {k: deep_round(v) for k, v in obj.items()}
-    elif isinstance(obj, list):
-        return [deep_round(item) for item in obj]
-    elif isinstance(obj, tuple):
-        return tuple(deep_round(item) for item in obj)
-    else:
-        return round_number(obj)
+    grouped = df.groupby(["layout", "layout_type"])
+    config_data = {}
+    shop_config_data = {}
 
-# تجميع البيانات حسب layout و layout_type
-grouped = df.groupby(['layout', 'layout_type'])
+    for (layout, layout_type), group in grouped:
+        target = config_data if layout_type == "whithout_shop" else shop_config_data
+        layout_dict = {}
 
-config_data = {}        # for whithout_shop
-shop_config_data = {}   # for whith_shop
+        # Collect all images (background, mobile, logo, icons) into one list
+        images = []
 
-for (layout, layout_type), group in grouped:
-    if layout_type == "whithout_shop":
-        target = config_data
-    elif layout_type == "whith_shop":
-        target = shop_config_data
-    else:
-        continue
-
-    layout_dict = {}
-
-    # معالجة background و background2
-    for _, row in group[group['element_type'].isin(['background', 'background2'])].iterrows():
-        elem_type = row['element_type']
-        key = 'background' if elem_type == 'background' else 'background2'
-        layout_dict[key] = {
-            'type': 'image',
-            'image': row['image']
-        }
-
-    # معالجة mobile و mobile2
-    for _, row in group[group['element_type'].isin(['mobile', 'mobile2'])].iterrows():
-        elem_type = row['element_type']
-        key = 'mobile_image' if elem_type == 'mobile' else 'mobile_image2'
-        item = {
-            'anchor': row['anchor'],
-            'width_pct': row['width_pct'],
-            'x_offset_pct': row['x_offset_pct'],
-            'y_offset_pct': row['y_offset_pct']
-        }
-        # إزالة القيم الفارغة
-        item = {k: v for k, v in item.items() if v is not None and not (isinstance(v, float) and np.isnan(v))}
-        layout_dict[key] = item
-
-    # معالجة logo و logo2 (فقط في whithout_shop)
-    if layout_type == "whithout_shop":
-        for _, row in group[group['element_type'].isin(['logo', 'logo2'])].iterrows():
-            elem_type = row['element_type']
-            key = 'logo' if elem_type == 'logo' else 'logo2'
-            item = {
-                'anchor': row['anchor'],
-                'width_pct': row['width_pct'],
-                'x_offset_pct': row['x_offset_pct'],
-                'y_offset_pct': row['y_offset_pct']
-            }
-            item = {k: v for k, v in item.items() if v is not None and not (isinstance(v, float) and np.isnan(v))}
-            layout_dict[key] = item
-
-    # معالجة images (مرتبة حسب index)
-    images = group[group['element_type'] == 'image'].sort_values('index')
-    if not images.empty:
-        images_list = []
-        for _, row in images.iterrows():
-            image = {
-                'anchor': row['anchor'],
-                'image': row['image'],
-                'width_pct': row['width_pct'],
-                'height_pct': row['height_pct'],
-                'x_offset_pct': row['x_offset_pct'],
-                'y_offset_pct': row['y_offset_pct']
-            }
-            image = {k: v for k, v in image.items() if v is not None and not (isinstance(v, float) and np.isnan(v))}
-            images_list.append(image)
-        layout_dict['images'] = images_list
-
-    # معالجة banner (فقط في whith_shop)
-    if layout_type == "whith_shop":
-        banner_row = group[group['element_type'] == 'banner']
-        banner_logo_row = group[group['element_type'] == 'banner_logo']
-        banner_shop_row = group[group['element_type'] == 'banner_shop_name']
-
-        if not banner_row.empty:
-            b = banner_row.iloc[0]
-            banner_dict = {
-                'width_pct': b['width_pct'],
-                'height_pct': b['height_pct'],
-                'background_color': b['background_color']
-            }
-            banner_dict = {k: v for k, v in banner_dict.items() if v is not None and not (isinstance(v, float) and np.isnan(v))}
-
-            # banner_logo
-            if not banner_logo_row.empty:
-                bl = banner_logo_row.iloc[0]
-                logo_dict = {
-                    'image': bl['image'],
-                    'anchor': bl['anchor'],
-                    'width_pct': bl['width_pct'],
-                    'x_offset_pct': bl['x_offset_pct'],
-                    'y_offset_pct': bl['y_offset_pct']
+        # Process backgrounds
+        for _, row in group[
+            group["element_type"].isin(["background", "background2"])
+        ].iterrows():
+            images.append(
+                {
+                    "type": "image",
+                    "image": row["image"],
+                    "anchor": row.get("anchor", "top-left"),
+                    "width_pct": row["width_pct"],
+                    "height_pct": row["height_pct"],
+                    "x_offset_pct": row["x_offset_pct"],
+                    "y_offset_pct": row["y_offset_pct"],
                 }
-                logo_dict = {k: v for k, v in logo_dict.items() if v is not None and not (isinstance(v, float) and np.isnan(v))}
-                banner_dict['logo'] = logo_dict
+            )
 
-            # banner_shop_name
-            if not banner_shop_row.empty:
-                bs = banner_shop_row.iloc[0]
-                shop_dict = {
-                    'font_size_pct': bs['font_size_pct'],
-                    'color': bs['background_color'],
-                    'x_offset_pct': bs['x_offset_pct'],
-                    'y_offset_pct': bs['y_offset_pct']
+        # Process mobiles
+        for _, row in group[
+            group["element_type"].isin(["mobile", "mobile2"])
+        ].iterrows():
+            images.append(
+                {
+                    "type": "image",
+                    "image": row["image"],
+                    "anchor": row["anchor"],
+                    "width_pct": row["width_pct"],
+                    "x_offset_pct": row["x_offset_pct"],
+                    "y_offset_pct": row["y_offset_pct"],
                 }
-                shop_dict = {k: v for k, v in shop_dict.items() if v is not None and not (isinstance(v, float) and np.isnan(v))}
-                banner_dict['shop_name'] = shop_dict
+            )
 
-            layout_dict['banner'] = banner_dict
+        # Process logos (only for without_shop)
+        if layout_type == "whithout_shop":
+            for _, row in group[
+                group["element_type"].isin(["logo", "logo2"])
+            ].iterrows():
+                images.append(
+                    {
+                        "type": "image",
+                        "image": row["image"],
+                        "anchor": row["anchor"],
+                        "width_pct": row["width_pct"],
+                        "x_offset_pct": row["x_offset_pct"],
+                        "y_offset_pct": row["y_offset_pct"],
+                    }
+                )
 
-    # تطبيق التقريب العميق على كل القيم الرقمية
-    layout_dict = deep_round(layout_dict)
+        # Process icons
+        for _, row in group[group["element_type"] == "icon"].iterrows():
+            images.append(
+                {
+                    "type": "image",
+                    "image": row["image"],
+                    "anchor": row["anchor"],
+                    "width_pct": row["width_pct"],
+                    "height_pct": row["height_pct"],
+                    "x_offset_pct": row["x_offset_pct"],
+                    "y_offset_pct": row["y_offset_pct"],
+                }
+            )
+        for _, row in group[group["element_type"] == "image"].iterrows():
+            images.append(
+                {
+                    "type": "image",
+                    "image": row["image"],
+                    "anchor": row["anchor"],
+                    "width_pct": row["width_pct"],
+                    "height_pct": row["height_pct"],
+                    "x_offset_pct": row["x_offset_pct"],
+                    "y_offset_pct": row["y_offset_pct"],
+                }
+            )
 
-    # إضافة الـ layout إلى الهدف
-    target[layout] = layout_dict
+        # Sort by index if column exists, else keep order
+        if "index" in group.columns:
+            images.sort(key=lambda x: x.get("index", 0))
+        layout_dict["images"] = images
 
-# دالة لتصدير YAML مع تنسيق جيد
-def write_yaml(file_path, data):
-    with open(file_path, 'w', encoding='utf-8') as f:
-        yaml.dump(data, f, allow_unicode=True, sort_keys=False, indent=2, default_flow_style=False)
+        # Banner handling for with_shop
+        if layout_type == "whith_shop":
+            banner_row = group[group["element_type"] == "banner"]
+            if not banner_row.empty:
+                banner = banner_row.iloc[0]
+                banner_dict = {
+                    "width_pct": banner["width_pct"],
+                    "height_pct": banner["height_pct"],
+                    "background_color": banner["background_color"],
+                }
+                # Add logo and shop name if present
+                logo_row = group[group["element_type"] == "banner_logo"]
+                if not logo_row.empty:
+                    banner_dict["logo"] = {
+                        "image": logo_row.iloc[0]["image"],
+                        "anchor": logo_row.iloc[0]["anchor"],
+                        "width_pct": logo_row.iloc[0]["width_pct"],
+                        "x_offset_pct": logo_row.iloc[0]["x_offset_pct"],
+                        "y_offset_pct": logo_row.iloc[0]["y_offset_pct"],
+                    }
+                name_row = group[group["element_type"] == "banner_shop_name"]
+                if not name_row.empty:
+                    banner_dict["shop_name"] = {
+                        "font_size_pct": name_row.iloc[0]["font_size_pct"],
+                        "color": name_row.iloc[0]["background_color"],
+                        "x_offset_pct": name_row.iloc[0]["x_offset_pct"],
+                        "y_offset_pct": name_row.iloc[0]["y_offset_pct"],
+                    }
+                layout_dict["banner"] = banner_dict
 
-# كتابة الملفين
-write_yaml('done_config_layout.yaml', config_data)
-write_yaml('done_shop_config_layout.yaml', shop_config_data)
+        layout_dict = deep_round(layout_dict)
+        target[layout] = layout_dict
 
-print("Created Successfully: config_layout.yaml و shop_config_layout.yaml")
+    def write_yaml(path, data):
+        with open(path, "w", encoding="utf-8") as f:
+            yaml.dump(
+                data,
+                f,
+                allow_unicode=True,
+                sort_keys=False,
+                indent=2,
+                default_flow_style=False,
+            )
+
+    write_yaml(output_without_shop, config_data)
+    write_yaml(output_with_shop, shop_config_data)
