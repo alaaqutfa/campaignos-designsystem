@@ -70,6 +70,12 @@ class DesignRenderer:
                 # تشويه النسبة لملء الإطار
                 layer_img = orig_img.resize((target_w, target_h), Image.Resampling.LANCZOS)
 
+            elif fit == "full-width":
+                scale = target_w / orig_w
+                new_w = target_w
+                new_h = int(orig_h * scale)
+                layer_img = orig_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
             else:  # cover (الافتراضي)
                 scale = max(target_w / orig_w, target_h / orig_h)
                 new_w = int(orig_w * scale)
