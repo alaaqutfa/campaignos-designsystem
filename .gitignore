@@ -12,6 +12,7 @@ out/
 build/
 dist/
 modules/__pycache__
+modules/__pycache__/*.py
 
 # Assets (if generated or not needed in repo)
 assets/
